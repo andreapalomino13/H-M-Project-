@@ -1,0 +1,253 @@
+#### First the Spark Session 
+
+import findspark
+findspark.init()
+
+import pandas as pd
+pd.set_option('display.max_colwidth', None)
+
+import os
+os.environ['PYSPARK_SUBMIT_ARGS'] = ' pyspark-shell'
+
+from pyspark.sql.session import SparkSession
+
+import pyspark.sql.functions as F
+
+spark = (SparkSession.builder
+.appName("Group 3 Assignment")
+.config("spark.sql.warehouse.dir","hdfs://localhost:9000/warehouse")
+.getOrCreate())
+
+#### Second, I import the data from my datalake & Stored in the pyspark enviroment. The project contains 3 datasets:
+
+articles_raw = (spark.read.option("inferSchema", "true")
+                    .option("header", "true")
+                    .csv("hdfs://localhost:9000/group_assignment/datalake/raw/articles"))
+
+customers_raw = (spark.read.option("inferSchema", "true")
+                    .option("header", "true")
+                    .csv("hdfs://localhost:9000/group_assignment/datalake/raw/customers"))
+
+transactions_raw = (spark.read.option("inferSchema", "true")
+                    .option("header", "true")
+                    .csv("hdfs://localhost:9000/group_assignment/datalake/raw/transactions"))
+### with this print I get the info of the columns that the dataset has
+articles_raw.printSchema()
+
+### Thrid, based on the info of the schema, I used the function cast to change the data type
+
+articles_std = articles_raw.select(
+    F.col("article_id").cast("string"),
+    F.col("product_code").cast("string"),
+    F.col("prod_name"),
+    F.col("product_type_no").cast("string"),
+    F.col("product_type_name"),
+    F.col("product_group_name"),
+    F.col("graphical_appearance_no").cast("string"),
+    F.col("graphical_appearance_name"),
+    F.col("colour_group_code").cast("string"),
+    F.col("colour_group_name"),
+    F.col("perceived_colour_value_id").cast("string"),
+    F.col("perceived_colour_value_name"),
+    F.col("perceived_colour_master_id").cast("string"),
+    F.col("perceived_colour_master_name"),
+    F.col("department_no").cast("string"),
+    F.col("department_name"),
+    F.col("index_code").cast("string"),
+    F.col("index_name"),
+    F.col("index_group_no").cast("string"),
+    F.col("index_group_name"),
+    F.col("section_no").cast("string"),
+    F.col("section_name"),
+    F.col("garment_group_no").cast("string"),
+    F.col("garment_group_name"),
+    F.col("detail_desc"),
+)
+# I overwrite the dataset on my datalake
+
+articles_std.write.mode("overwrite").parquet("hdfs://localhost:9000/group_assignment/datalake/std/articles")
+
+# now the same step but for customers table 
+
+customers_raw.printSchema()
+customers_std = customers_raw.select(
+    F.col("customer_id"),
+    F.col("FN").cast("string"),
+    F.col("active").cast("string"),
+    F.col("club_member_status"),
+    F.col("fashion_news_frequency"),
+    F.col("age"),
+    F.col("postal_code").cast("string"),
+)
+
+#write it on the datalake
+customers_std.write.mode("overwrite").parquet("hdfs://localhost:9000/group_assignment/datalake/std/customers")
+
+#Finally the table transactions
+
+transactions_raw.printSchema()
+
+transactions_std = transactions_raw.select(
+    F.col("t_dat"),
+    F.col("customer_id"),
+    F.col("article_id").cast("string"),
+    F.col("price"),
+    F.col("sales_channel_id").cast("string"),
+)
+
+transactions_std = transactions_std.withColumn("year", F.substring("t_dat", 0, 4))
+transactions_std = transactions_std.withColumn("month", F.substring("t_dat", 6, 2))
+transactions_std = transactions_std.withColumn("day", F.substring("t_dat", 9, 2))
+
+transactions_std.write.mode("overwrite").parquet("hdfs://localhost:9000/group_assignment/datalake/std/transactions")
+
+# then, I load the files from my datalake/std folder and begin to operate on the datasets
+
+articles_std = spark.read.parquet("hdfs://localhost:9000/group_assignment/datalake/std/articles")
+customers_std = spark.read.parquet("hdfs://localhost:9000/group_assignment/datalake/std/customers")
+transactions_std = spark.read.parquet("hdfs://localhost:9000/group_assignment/datalake/std/transactions")
+
+# Now I wanted to analyze and profiling the customers. In the competition they mention that the dataset contains the rewards program so for the first approach I want to know how many statues H&M Has
+(customers_std.groupBy("club_member_status")
+        .agg(
+            F.count("*").alias("count"))
+        .sort(F.col("count").desc())
+        ).toPandas()
+#It seems that the majority are active clients. In the case we wanted to profile the churn we will need more data.
+
+#Luckly I have the age of the clients so I will set a range to categorize them another approach could be analyze the distribution of the age but in this case I create a category.
+
+age_range = F.udf(lambda age: '< 20' if age < 20 else 
+                       '20-25' if (age >= 20 and age < 25) else
+                       '25-30' if (age >= 25 and age < 30) else
+                       '30-35' if (age >= 30 and age < 35) else
+                       '35-40' if (age >= 35 and age < 40) else
+                       '40-45' if (age >= 40 and age < 45) else
+                       '45-50' if (age >= 45 and age < 50) else
+                       '50-55' if (age >= 50 and age < 55) else
+                       '55-60' if (age >= 55 and age < 60) else
+                       '60-65' if (age >= 60 and age < 65) else
+                       '65-70' if (age >= 65 and age < 70) else
+                        '75+'  if (age >= 70) else '')
+
+customers_std=customers_std.na.fill(value=0,subset=["age"])
+customers_std=customers_std.withColumn('age_range',age_range(customers_std.age))
+
+# Age ranges most frecuents in the customers
+
+(customers_std.groupBy("age_range")
+        .agg(
+            F.count("*").alias("count"))
+        ).sort(F.col("count").desc()).toPandas()
+
+# as I mention, I also want to know beetween what age has the majority of the clients. So I create a function and set up 70% of the clients as majority.
+#here i group the age_range based on counts.
+
+age_group_counts = customers_std.groupBy("age_range").agg(
+    F.count("*").alias("count"))
+
+#here i calculate the cumulative %
+age_group_counts = age_group_counts.withColumn(
+    "cumulative_percentage",
+    F.sum("count").over(Window.orderBy(F.desc("count"))).cast("double") / F.sum("count").over(Window.partitionBy()))
+
+seventy_percent_age_range = age_group_counts.filter(
+    F.col("cumulative_percentage") >= 0.7   #the 0,7 can be changed for other %
+).orderBy("age_range").first()
+
+
+# Now I want to analyze the transaccions 
+
+transactions_gold=transactions_std.withColumn("is_weekend",F.dayofweek("t_dat").isin([1,7]).cast("int"))
+
+transactions_gold.groupBy("is_weekend").agg(F.count("*").alias("count")).sort(F.col("count").desc()).toPandas()
+
+# I create a colummn as a label is_weekend to know when the transacctions have been made 
+transactions_gold.where("sales_channel_id==2").groupBy("is_weekend").agg(F.count("*").alias("count")).sort(F.col("count").desc()).toPandas()
+#the results shows that during the week days people but more.
+
+# Consequently I wanted to know when the transactions from the web are more frequently. Sales_channel_id==2 is the part of web Sales.
+transactions_gold.where("sales_channel_id==2").groupBy("is_weekend").agg(F.count("*").alias("count")).sort(F.col("count").desc()).toPandas()
+
+#The same but with off-line purchases:
+transactions_gold.where("sales_channel_id==1").groupBy("is_weekend").agg(F.count("*").alias("count")).sort(F.col("count").desc()).toPandas()
+
+# for the articles, was challenging classifying them.
+# I  add colour coding to make a more visual appealing experience for the reader
+
+articles_gold=articles_std.withColumn("colour_symbol",
+                       F.when((articles_std.colour_group_name).like("%Black%"),F.lit("🖤"))\
+                      .when((articles_std.colour_group_name).like("%White%"),F.lit("🤍"))\
+                      .when((articles_std.colour_group_name).like("%Blue%"),F.lit("💙"))\
+                      .when((articles_std.colour_group_name).like("%Lilac Purple%"),F.lit("💜"))\
+                      .when((articles_std.colour_group_name).like("%Red%"),F.lit("♥"))\
+                      .when((articles_std.colour_group_name).like("%Orange%"),F.lit("🧡"))\
+                      .when((articles_std.colour_group_name).like("%Green%"),F.lit("💚"))\
+                      .when((articles_std.colour_group_name).like("%Yellow%"),F.lit("💛"))\
+                      .when((articles_std.colour_group_name).like("%Pink%"),F.lit("💖"))\
+                      .when((articles_std.colour_group_name).like("%Brown%"),F.lit("🤎"))\
+                                      .otherwise(F.lit(None)))
+
+
+#then  filter showing products and their dependent index name
+
+columns=['index_group_name','product_group_name']
+articles_gold.groupBy(columns).agg(F.count("*").alias("count")).sort(F.col("count").desc()).toPandas()
+
+articles_gold.write.mode("overwrite").parquet("hdfs://localhost:9000/group_assignment/datalake/gold/articles")
+
+# Finally, after analyzing the 3 datasets separately I join them 
+
+transactions_total = (transactions_gold.alias("t")
+                                   .join(customers_std.alias("c"),F.col("t.customer_id")==F.col("c.customer_id"),"inner")
+                                   .join(articles_gold.alias("a"),F.col("t.article_id")==F.col("a.article_id"),"inner")
+                                   .select("t.customer_id","a.prod_name",
+                                           "c.club_member_status",
+                                           "c.age_range",
+                                           "a.product_group_name",
+                                           "c.Active",
+                                           "t.year",
+                                           "t.month",
+                                           "a.index_group_name",
+                                           "a.Colour_symbol",
+                                           "a.prod_name").cache())
+
+#frequent products buyed by clients in range 25-30
+
+columns=[ "age_range","product_group_name",]
+transactions_total.where("age_range='25-30'").groupBy(columns).agg(F.count("*").alias("count")).sort(F.col("count").desc()).toPandas()
+
+#frequent products buyed by clients in range 20-25
+
+columns=[ "age_range","product_group_name",]
+transactions_total.where("age_range='20-25'").groupBy(columns).agg(F.count("*").alias("count")).sort(F.col("count").desc()).toPandas()
+
+#age_range people that buy in web
+
+(transactions_total.where("sales_channel_id==2").groupBy("age_range")
+        .agg(
+            F.count("*").alias("count"))
+        .sort(F.col("count").desc())
+        ).limit(10).toPandas()
+
+#colour prefered by age range in the product product_group_name
+
+columns=["age_range","colour_symbol"]
+(transactions_total.where("sales_channel_id==2 and product_group_name=='Garment Upper body'").groupBy(columns)
+        .agg(
+            F.count("*").alias("count"))
+        .sort(F.col("count").desc())
+        ).limit(10).toPandas()
+
+#frequent customers 
+
+frec_customer = transactions_total.groupBy("customer_id").count().where("count > 1000").orderBy(F.col("count").desc())
+frec_customer.toPandas()
+
+#months with more pruchases
+
+time=["year","month"]
+
+months = transactions_total.groupBy(time).count().orderBy(F.col("count").desc())
+months.toPandas()
+
